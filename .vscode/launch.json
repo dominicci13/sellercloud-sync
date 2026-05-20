@@ -6,6 +6,7 @@
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/run_sellercloud_sync.py",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
       "console": "integratedTerminal"
     }
   ]
