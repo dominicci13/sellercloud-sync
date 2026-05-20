@@ -5,8 +5,8 @@
       "name": "Run Automation",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/run_sellercloud_sync.py",
-      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "program": "${workspaceFolder:sellercloud-sync}/run_sellercloud_sync.py",
+      "python": "${workspaceFolder:sellercloud-sync}/.venv/Scripts/python.exe",
       "console": "integratedTerminal"
     }
   ]
