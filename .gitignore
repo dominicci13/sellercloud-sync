@@ -1,0 +1,37 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Logs and outputs
+logs/
+output/
+downloaded_files/
+screenshots/
+!logs/.gitkeep
+!screenshots/.gitkeep
+
+# Local config / secrets
+.env
+config/*.json
+!config/*.json.example
+
+# Working artifacts
+tasks/
+.claude/
+CLAUDE.md
+
+# Data files
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+
+# OS junk
+.DS_Store
+*.db
