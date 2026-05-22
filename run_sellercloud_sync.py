@@ -8,7 +8,7 @@ typically lands in OneDrive), this script:
    is already in the table, and we'd rather miss a day than overwrite with
    stale data).
 3. Clears the ``Reports.SellerCloud`` table.
-4. Bulk-inserts every row via ``fc_utils.database_utils.insert_dataframe``.
+4. Bulk-inserts every row via ``seller_automation_utils.database_utils.insert_dataframe``.
 
 Extracted from ``amzn-catalog-health`` in May 2026 so this daily refresh runs
 independently of the larger nightly catalog/health scrape job at 04:00.
@@ -23,12 +23,12 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
-from fc_utils import alert_utils, custom_functions, database_utils
-from fc_utils.config_utils import load_config_safe
-from fc_utils.file_utils import latest_modified_date
-from fc_utils.logging_utils import setup_logging
-from fc_utils.schedule_utils import run_on_schedule
-from fc_utils.ui_utils import ask_user
+from seller_automation_utils import alert_utils, custom_functions, database_utils
+from seller_automation_utils.config_utils import load_config_safe
+from seller_automation_utils.file_utils import latest_modified_date
+from seller_automation_utils.logging_utils import setup_logging
+from seller_automation_utils.schedule_utils import run_on_schedule
+from seller_automation_utils.ui_utils import ask_user
 
 
 log = setup_logging("sellercloud_sync")
@@ -56,7 +56,7 @@ def sellercloud_db(reports_cursor) -> None:
 
     Raises:
         RuntimeError: If a row fails to insert (the traceback carries the
-            failing row's full column → value mapping via fc-utils 0.7.1).
+            failing row's full column → value mapping via seller-automation-utils 0.7.1).
     """
     reports_cursor.execute(f"DELETE FROM {table_sellercloud}")
     log.info("Table rows deleted successfully.")
