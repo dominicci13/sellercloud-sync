@@ -39,4 +39,4 @@ Prompts whether to run immediately, then schedules itself to run at 05:15 daily 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)
