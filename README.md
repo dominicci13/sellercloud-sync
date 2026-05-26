@@ -4,6 +4,12 @@ Daily ETL that loads the SellerCloud catalog export into SQL Server. Reads `Sell
 
 This script was extracted from `amzn-catalog-health` in May 2026 so the daily catalog refresh runs independently of the larger nightly catalog/health scrape job. The `Reports.SellerCloud` table feeds many downstream reports across the suite; decoupling its refresh removes a hidden dependency on a long-running job that occasionally crashes early.
 
+## Daily flow
+
+1. **Read export** — read `SellerCloud.xlsx` from the configured OneDrive path.
+2. **Normalize** — normalize column dtypes for the SQL schema.
+3. **Reload table** — clear the `Reports.SellerCloud` table and bulk-insert every row via `seller_automation_utils.database_utils.insert_dataframe`.
+
 ## Setup
 
 ### 1. Install dependencies
@@ -22,7 +28,7 @@ cp config/paths.json.example config/paths.json
 
 Edit both files with your local paths and SQL table name.
 
-## Run
+### 3. Run
 
 ```bash
 python run_sellercloud_sync.py
@@ -30,7 +36,7 @@ python run_sellercloud_sync.py
 
 Prompts whether to run immediately, then schedules itself to run at 05:15 daily via APScheduler.
 
-## Environment Variables
+## Environment variables
 
 | Variable | Description |
 |---|---|
