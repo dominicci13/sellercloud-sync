@@ -4,27 +4,34 @@
 # Python cache
 __pycache__/
 *.pyc
-*.egg-info/
-dist/
-build/
 
-# Logs and outputs
-logs/
-output/
-downloaded_files/
-screenshots/
+# Logs and outputs — keep folder structure visible, ignore content
+logs/*
 !logs/.gitkeep
+output/*
+!output/.gitkeep
+downloaded_files/*
+!downloaded_files/.gitkeep
+
+# Screenshots — ignore everything except .gitkeep so the folder is tracked
+screenshots/*
 !screenshots/.gitkeep
 
 # Local config / secrets
-.env
 config/*.json
 !config/*.json.example
+.env
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
 
 # Working artifacts
 tasks/
 .claude/
 CLAUDE.md
+*.db
 
 # Data files
 *.xlsx
@@ -34,4 +41,6 @@ CLAUDE.md
 
 # OS junk
 .DS_Store
-*.db
+
+# Pytest cache
+.pytest_cache/
