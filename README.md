@@ -37,6 +37,10 @@ Prompts whether to run immediately, then schedules itself to run at 05:15 daily 
 | `DB_TABLE_SELLERCLOUD` | SQL Server table name (default: `SellerCloud`) |
 | `ALERT_EMAIL` | Outlook account used to send crash reports via `seller_automation_utils.alert_utils.handle_crash` |
 
+## Author
+
+Built by **Brian Ramirez** ([@dominicci13](https://github.com/dominicci13)) — automation & AI workflow specialist. More on my [GitHub profile](https://github.com/dominicci13) and [LinkedIn](https://linkedin.com/in/bdramirez).
+
 ## License
 
 [MIT](LICENSE)
