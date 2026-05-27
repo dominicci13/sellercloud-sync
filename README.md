@@ -31,14 +31,19 @@ No browser, no Excel automation — just a fast, defensive file-to-SQL load:
   today's (or the folder is empty) it logs and exits cleanly — it would
   rather miss a day than overwrite `Reports.SellerCloud` with stale data that
   many downstream reports depend on.
-- **Explicit dtype normalization.** Text columns are forced to `str` (so
-  leading-zero IDs like UPC / SKU / eBayItemID survive), int and float columns
-  are coerced with `pd.to_numeric(errors="coerce").fillna(0)`.
+- **One-stop column schema.** A single ordered `COLUMN_TYPES` dict maps every
+  Excel column to how it's coerced and drives reading, normalization, and
+  insertion. Adding a column the export starts emitting is a one-line edit.
+- **Explicit dtype normalization.** Text columns are read as `str` (so
+  leading-zero and long numeric IDs like UPC / SKU / eBayItemID survive without
+  a `.0`); `int`/`float` columns coerce blanks to `0`; `float_null` analytical
+  columns (P&L, shipping cost, FBAFee, Rebate, TotalCost) and the `datetime`
+  `LastReceived` keep blanks as SQL `NULL`. Names with spaces/symbols like
+  `P&L (30 days)` are bracketed for SQL automatically.
 - **Injection-safe table name.** `DB_TABLE_SELLERCLOUD` is validated
   (`isalnum` after stripping underscores) before use.
-- **Full-replace load.** A single `DELETE` then a bulk `insert_dataframe`,
-  with columns renamed to the SQL schema (`Manufacturer` → `BrandName`,
-  `MFNQuantity` → `AmazonQuantity`).
+- **Full-replace load.** A single `DELETE` then a bulk `insert_dataframe` of all
+  41 columns in their SQL-schema order.
 - **Decoupled by design.** Extracted from `amzn-catalog-health` so this daily
   refresh can't be blocked by the long-running nightly scrape.
 

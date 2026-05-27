@@ -44,6 +44,79 @@ _paths = load_config_safe(Path(__file__).resolve().parent / "config" / "paths.js
 sellercloud_file_path: str = _paths["sellercloud_file_path"]
 
 
+# --- Column schema --------------------------------------------------------
+# The single place to edit when the SellerCloud.xlsx export gains/loses a
+# column. Keys are the *exact* Excel header (which also matches the SQL column
+# name); the value picks how the cell is coerced before insert:
+#
+#   "text"       -> string; blanks become "" (read as str so leading zeros and
+#                   long numeric IDs like eBayItemID survive without a ".0").
+#   "int"        -> whole number; blanks/garbage become 0.
+#   "float"      -> decimal; blanks/garbage become 0.
+#   "float_null" -> decimal; blanks stay NULL (use for analytical metrics where
+#                   "no data" must stay distinct from a real 0).
+#   "datetime"   -> timestamp; blanks/unparseable stay NULL.
+#
+# Order here is the SQL table's column order. To add a new column, drop one
+# line in the right spot with its type — it flows through read, normalize,
+# and insert automatically. Names with spaces/symbols are bracketed for SQL
+# on the fly, so write them plainly (e.g. "P&L (30 days)").
+COLUMN_TYPES: dict[str, str] = {
+    "SKU": "text",
+    "ASIN": "text",
+    "CompanyID": "int",
+    "CompanyName": "text",
+    "WalmartAPIItemID": "text",
+    "eBayItemID": "text",
+    "ProductName": "text",
+    "Manufacturer": "text",
+    "Vendor": "text",
+    "BuyerEmail": "text",
+    "UPC": "text",
+    "AggregateQty": "int",
+    "MFNQuantity": "int",
+    "FBAQuantity": "int",
+    "AmazonPrice": "float",
+    "AmazonBusinessPrice": "float",
+    "AmazonBusinessPriceDiscountQty1": "int",
+    "Rebate": "float_null",
+    "ListPrice": "float",
+    "SitePrice": "float",
+    "MAPPrice": "float",
+    "SiteCost": "float",
+    "TotalCost": "float_null",
+    "CountryofOrigin": "text",
+    "WeightLbs": "float",
+    "WeightOz": "float",
+    "Length": "float",
+    "Width": "float",
+    "Height": "float",
+    "OnOrder": "int",
+    "QtySold30": "int",
+    "P&L (30 days)": "float_null",
+    "P&L (90 days)": "float_null",
+    "AverageShippingCost (30 Days)": "float_null",
+    "AverageShippingCost (90 Days)": "float_null",
+    "SearchTerms": "text",
+    "AmazonShippingTemplate": "text",
+    "ASIN1": "text",
+    "LastReceived": "datetime",
+    "FBAFee": "float_null",
+    "MinPrice": "float",
+}
+
+
+def _sql_identifier(name: str) -> str:
+    """Bracket a column name for SQL Server when it isn't a plain identifier.
+
+    ``insert_dataframe`` interpolates column names straight into the INSERT
+    statement, so names containing spaces or symbols (e.g. ``P&L (30 days)``)
+    must be wrapped in brackets to be valid T-SQL. Plain names pass through
+    unchanged.
+    """
+    return name if name.replace("_", "").isalnum() else f"[{name}]"
+
+
 def sellercloud_db(reports_cursor) -> None:
     """Replace every row in the SellerCloud SQL table with the latest export.
 
@@ -61,46 +134,41 @@ def sellercloud_db(reports_cursor) -> None:
     reports_cursor.execute(f"DELETE FROM {table_sellercloud}")
     log.info("Table rows deleted successfully.")
 
+    text_cols = [c for c, t in COLUMN_TYPES.items() if t == "text"]
+    int_cols = [c for c, t in COLUMN_TYPES.items() if t == "int"]
+    float_cols = [c for c, t in COLUMN_TYPES.items() if t == "float"]
+    float_null_cols = [c for c, t in COLUMN_TYPES.items() if t == "float_null"]
+    datetime_cols = [c for c, t in COLUMN_TYPES.items() if t == "datetime"]
+
+    # Read text columns as str so leading zeros and long IDs (eBayItemID,
+    # WalmartAPIItemID) don't get coerced to floats and pick up a ".0".
     df = pd.read_excel(
         f"{sellercloud_file_path}/SellerCloud.xlsx",
-        dtype={
-            "SKU": str, "ASIN": str, "CompanyName": str, "WalmartAPIItemID": str,
-            "eBayItemID": str, "ProductName": str, "Manufacturer": str,
-            "Vendor": str, "BuyerEmail": str, "UPC": str, "CountryofOrigin": str,
-        },
+        dtype={c: str for c in text_cols},
     )
 
-    text_columns = [
-        "SKU", "ASIN", "CompanyName", "WalmartAPIItemID", "eBayItemID",
-        "ProductName", "Manufacturer", "Vendor", "BuyerEmail", "UPC", "CountryofOrigin",
-    ]
-    int_columns = ["MFNQuantity", "AggregateQty", "OnOrder", "CompanyID"]
-    float_columns = [
-        "AmazonPrice", "AmazonBusinessPrice", "ListPrice", "SitePrice", "MinPrice",
-        "MAPPrice", "SiteCost", "WeightLbs", "WeightOz", "Length", "Width", "Height",
-    ]
-
-    for col in float_columns:
+    for col in float_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    for col in text_columns:
-        df[col] = df[col].astype(str)
-    df[text_columns] = df[text_columns].fillna("")
-    for col in int_columns:
+    for col in int_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    for col in text_cols:
+        # fillna before astype so blank cells become "" rather than "nan".
+        df[col] = df[col].fillna("").astype(str)
+    for col in float_null_cols:
+        s = pd.to_numeric(df[col], errors="coerce")
+        df[col] = s.astype(object).where(s.notna(), None)
+    for col in datetime_cols:
+        s = pd.to_datetime(df[col], errors="coerce")
+        df[col] = s.astype(object).where(s.notna(), None)
 
-    df_for_insert = df.rename(columns={
-        "Manufacturer": "BrandName",
-        "MFNQuantity": "AmazonQuantity",
+    # insert_dataframe uses each name as both the SQL identifier and the
+    # DataFrame key, so bracket the special-character columns and rename the
+    # matching DataFrame columns to keep the two in sync.
+    sql_columns = [_sql_identifier(c) for c in COLUMN_TYPES]
+    df = df.rename(columns={
+        c: ident for c, ident in zip(COLUMN_TYPES, sql_columns) if ident != c
     })
-    columns = [
-        "SKU", "ASIN", "CompanyName", "WalmartAPIItemID", "eBayItemID",
-        "ProductName", "BrandName", "Vendor", "BuyerEmail", "UPC",
-        "AmazonQuantity", "AggregateQty", "AmazonPrice", "AmazonBusinessPrice",
-        "ListPrice", "SitePrice", "MAPPrice", "SiteCost", "CountryofOrigin",
-        "WeightLbs", "WeightOz", "Length", "Width", "Height", "OnOrder",
-        "CompanyID", "MinPrice",
-    ]
-    database_utils.insert_dataframe(reports_cursor, table_sellercloud, df_for_insert, columns)
+    database_utils.insert_dataframe(reports_cursor, table_sellercloud, df, sql_columns)
     log.info("Data inserted successfully.")
 
 
