@@ -109,6 +109,9 @@ COLUMN_TYPES: dict[str, str] = {
     "LastReceived": "datetime",
     "FBAFee": "float_null",
     "MinPrice": "float",
+    "IsBundle": "int",  # native Excel bool -> 1/0; SQL column is BIT
+    "QtySold60": "int",
+    "Sales60": "float",
 }
 
 
