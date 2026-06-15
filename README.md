@@ -1,14 +1,15 @@
 # sellercloud-sync
 
-Daily ETL that loads the SellerCloud catalog export into SQL Server. Reads `SellerCloud.xlsx` from the configured OneDrive path, normalizes column dtypes, clears the `Reports.SellerCloud` table, and bulk-inserts every row via `seller_automation_utils.database_utils.insert_dataframe`. Runs at 05:15 daily via APScheduler — ~15 minutes after the SellerCloud daily report typically lands in OneDrive.
+Daily ETL that loads the SellerCloud catalog export into SQL Server. Reads `SellerCloud.xlsx` from the configured OneDrive path, checks its headers against the known schema, normalizes column dtypes, clears the `Reports.SellerCloud` table, and bulk-inserts every row via `seller_automation_utils.database_utils.insert_dataframe`. Runs at 05:15 daily via APScheduler — ~15 minutes after the SellerCloud daily report typically lands in OneDrive.
 
 This script was extracted from `amzn-catalog-health` in May 2026 so the daily catalog refresh runs independently of the larger nightly catalog/health scrape job. The `Reports.SellerCloud` table feeds many downstream reports across the suite; decoupling its refresh removes a hidden dependency on a long-running job that occasionally crashes early.
 
 ## Daily flow
 
 1. **Read export** — read `SellerCloud.xlsx` from the configured OneDrive path.
-2. **Normalize** — normalize column dtypes for the SQL schema.
-3. **Reload table** — clear the `Reports.SellerCloud` table and bulk-insert every row via `seller_automation_utils.database_utils.insert_dataframe`.
+2. **Schema check** — compare headers against `COLUMN_TYPES`; on drift, email a one-time alert and (for removed columns) skip the write. See [Schema-drift alerts](#schema-drift-alerts).
+3. **Normalize** — normalize column dtypes for the SQL schema.
+4. **Reload table** — clear the `Reports.SellerCloud` table and bulk-insert every row via `seller_automation_utils.database_utils.insert_dataframe`.
 
 ## Architecture
 
@@ -17,10 +18,35 @@ flowchart LR
     sched[APScheduler<br/>daily 05:15] --> fresh{File dated<br/>today?}
     fresh -->|no| skip[Skip — keep<br/>yesterday's data]
     fresh -->|yes| read[Read SellerCloud.xlsx<br/>dtype-typed]
-    read --> norm[Normalize text / int / float columns]
+    read --> drift{Headers match<br/>COLUMN_TYPES?}
+    drift -->|new column| alert[Email one-time<br/>alert] --> norm
+    drift -->|removed column| halt[Email alert +<br/>skip write — keep<br/>yesterday's data]
+    drift -->|yes| norm[Normalize text / int / float columns]
     norm --> reload[DELETE all rows<br/>+ bulk insert]
     reload --> db[(SQL Server<br/>Reports.SellerCloud)]
 ```
+
+## Schema-drift alerts
+
+The SellerCloud export occasionally gains or loses columns. Rather than silently
+dropping new data or crashing on a vanished column, the script diffs the report's
+headers against the `COLUMN_TYPES` dict on every run:
+
+- **New column** (in the report, not in `COLUMN_TYPES`) — harmless to the load
+  (the insert writes an explicit column list), so the sync continues and emails
+  an alert. The email samples the column's values, infers a likely type, and
+  includes ready-to-paste `COLUMN_TYPES` and `ALTER TABLE` lines plus numbered
+  steps for wiring it into both the script and the SQL table.
+- **Removed column** (in `COLUMN_TYPES`, not in the report) — would break the
+  insert, so the script emails an alert and **skips the DB write**, leaving
+  yesterday's data intact. The email gives rename/remove steps.
+
+The read happens *before* the `DELETE`, so a drifted schema (or an unreadable
+file) never clears the table and then fails to refill it.
+
+To avoid a daily nag, alerts are deduped via `logs/schema_alert_state.json`: each
+column is emailed once, and entries clear automatically once the drift is
+resolved. Alerts go to `ALERT_EMAIL` (the same address as crash reports).
 
 ## Performance notes
 
@@ -75,7 +101,7 @@ sellercloud-sync/
 ├── run_sellercloud_sync.py     # entry point (single script)
 ├── config/
 │   └── paths.json.example      # OneDrive folder holding SellerCloud.xlsx
-├── logs/                       # rotating run logs (gitignored)
+├── logs/                       # rotating run logs + schema_alert_state.json (gitignored)
 ├── .env.example
 ├── requirements.txt
 ├── LICENSE
@@ -116,7 +142,7 @@ The script prompts "Run now?" — answer **Y** to execute immediately, or **N** 
 | Variable | Description |
 |---|---|
 | `DB_TABLE_SELLERCLOUD` | SQL Server table name (default: `SellerCloud`) |
-| `ALERT_EMAIL` | Outlook account used to send crash reports via `seller_automation_utils.alert_utils.handle_crash` |
+| `ALERT_EMAIL` | Outlook account used to send crash reports (`seller_automation_utils.alert_utils.handle_crash`) and schema-drift alerts |
 
 ## Author
 
