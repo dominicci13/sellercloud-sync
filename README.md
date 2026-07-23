@@ -69,7 +69,7 @@ No browser, no Excel automation — just a fast, defensive file-to-SQL load:
 - **Injection-safe table name.** `DB_TABLE_SELLERCLOUD` is validated
   (`isalnum` after stripping underscores) before use.
 - **Full-replace load.** A single `DELETE` then a bulk `insert_dataframe` of all
-  44 columns in their SQL-schema order.
+  46 columns in their SQL-schema order.
 - **Decoupled by design.** Extracted from `amzn-catalog-health` so this daily
   refresh can't be blocked by the long-running nightly scrape.
 
