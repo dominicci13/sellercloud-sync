@@ -30,6 +30,7 @@ build/
 # Working artifacts
 tasks/
 .claude/
+.claude-flow/
 CLAUDE.md
 *.db
 
