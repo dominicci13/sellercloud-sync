@@ -19,6 +19,7 @@ independently of the larger nightly catalog/health scrape job at 04:00.
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import traceback
@@ -66,7 +67,8 @@ sellercloud_file_path: str = _paths["sellercloud_file_path"]
 # Order here is the SQL table's column order. To add a new column, drop one
 # line in the right spot with its type — it flows through read, normalize,
 # and insert automatically. Names with spaces/symbols are bracketed for SQL
-# on the fly, so write them plainly (e.g. "P&L (30 days)").
+# by the shared insert_dataframe (1.8.3+), so write them plainly
+# (e.g. "P&L (30 days)").
 COLUMN_TYPES: dict[str, str] = {
     "SKU": "text",
     "ASIN": "text",
@@ -136,12 +138,19 @@ _ALERT_STATE_PATH = Path(__file__).resolve().parent / "logs" / "schema_alert_sta
 def _sql_identifier(name: str) -> str:
     """Bracket a column name for SQL Server when it isn't a plain identifier.
 
-    ``insert_dataframe`` interpolates column names straight into the INSERT
-    statement, so names containing spaces or symbols (e.g. ``P&L (30 days)``)
-    must be wrapped in brackets to be valid T-SQL. Plain names pass through
-    unchanged.
+    Used only to build the ``ALTER TABLE`` suggestion in the schema-drift
+    alert, where a name with spaces or symbols (e.g. ``P&L (30 days)``) must be
+    wrapped in brackets to be valid T-SQL. Plain names pass through unchanged.
+    The INSERT path does not use it: ``insert_dataframe`` brackets every
+    column itself since seller-automation-utils 1.8.3.
+
+    Args:
+        name (str): Column name as it appears in the report header.
+
+    Returns:
+        str: ``name`` unchanged, or ``[name]`` when it is not a plain identifier.
     """
-    return name if name.replace("_", "").isalnum() else f"[{name}]"
+    return name if name.replace("_", "").isalnum() else f"[{name.replace(']', ']]')}]"
 
 
 def _diff_schema(
@@ -261,13 +270,13 @@ def _build_alert_body(
         for d in new_described:
             samples = ", ".join(d["samples"]) if d["samples"] else "(no sample values)"
             parts.append(
-                f"<p><b>{d['name']}</b><br>"
-                f"Sample values: <code>{samples}</code><br>"
+                f"<p><b>{html.escape(str(d['name']))}</b><br>"
+                f"Sample values: <code>{html.escape(samples)}</code><br>"
                 f"Inferred type: <b>{d['inferred']}</b></p>"
             )
 
-        py_lines = "<br>".join(d["column_line"].strip() for d in new_described)
-        alter_lines = "<br>".join(str(d["alter_stmt"]) for d in new_described)
+        py_lines = "<br>".join(html.escape(d["column_line"].strip()) for d in new_described)
+        alter_lines = "<br>".join(html.escape(str(d["alter_stmt"])) for d in new_described)
 
         parts.append(
             "<h4>1) Add to the Python script</h4>"
@@ -384,12 +393,17 @@ def sellercloud_db(reports_cursor) -> None:
     or its schema drifted, the table keeps yesterday's data instead of being
     cleared and then left empty by a crash.
 
+    Column names go to ``insert_dataframe`` exactly as ``COLUMN_TYPES`` declares
+    them; seller-automation-utils 1.8.3+ brackets each one, so ``P&L (30 days)``
+    needs no renaming here. An older library interpolates names verbatim and
+    the INSERT fails, so the venv must be on 1.8.3 or later.
+
     Args:
         reports_cursor: Active pyodbc cursor for the Reports database.
 
     Raises:
         RuntimeError: If a row fails to insert (the traceback carries the
-            failing row's full column → value mapping via seller-automation-utils 0.7.1).
+            failing row's full column → value mapping, added in seller-automation-utils 0.7.1).
     """
     text_cols = [c for c, t in COLUMN_TYPES.items() if t == "text"]
     int_cols = [c for c, t in COLUMN_TYPES.items() if t == "int"]
@@ -429,14 +443,7 @@ def sellercloud_db(reports_cursor) -> None:
         s = pd.to_datetime(df[col], errors="coerce")
         df[col] = s.astype(object).where(s.notna(), None)
 
-    # insert_dataframe uses each name as both the SQL identifier and the
-    # DataFrame key, so bracket the special-character columns and rename the
-    # matching DataFrame columns to keep the two in sync.
-    sql_columns = [_sql_identifier(c) for c in COLUMN_TYPES]
-    df = df.rename(columns={
-        c: ident for c, ident in zip(COLUMN_TYPES, sql_columns) if ident != c
-    })
-    database_utils.insert_dataframe(reports_cursor, table_sellercloud, df, sql_columns)
+    database_utils.insert_dataframe(reports_cursor, table_sellercloud, df, list(COLUMN_TYPES))
     log.info("Data inserted successfully.")
 
 

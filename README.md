@@ -65,7 +65,8 @@ No browser, no Excel automation — just a fast, defensive file-to-SQL load:
   a `.0`); `int`/`float` columns coerce blanks to `0`; `float_null` analytical
   columns (P&L, shipping cost, FBAFee, Rebate, TotalCost) and the `datetime`
   `LastReceived` keep blanks as SQL `NULL`. Names with spaces/symbols like
-  `P&L (30 days)` are bracketed for SQL automatically.
+  `P&L (30 days)` are bracketed for SQL automatically by the shared
+  `insert_dataframe` (seller-automation-utils 1.8.3 or later is required).
 - **Injection-safe table name.** `DB_TABLE_SELLERCLOUD` is validated
   (`isalnum` after stripping underscores) before use.
 - **Full-replace load.** A single `DELETE` then a bulk `insert_dataframe` of all
@@ -117,8 +118,9 @@ git clone https://github.com/dominicci13/sellercloud-sync.git
 cd sellercloud-sync
 py -3.12 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\pip install git+https://github.com/dominicci13/shared-python-utils.git
 ```
+
+`requirements.txt` pins seller-automation-utils to a commit (1.8.3); bump the pin deliberately, never install the library unpinned.
 
 ### 2. Configure
 
