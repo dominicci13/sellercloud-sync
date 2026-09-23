@@ -1,6 +1,6 @@
 # Shared automation utilities — pulls in selenium, seleniumbase, xlwings,
 # pandas, pyodbc, pywin32, pillow, apscheduler, rich transitively.
-seller-automation-utils @ git+https://github.com/dominicci13/shared-python-utils.git@b469db5106015266ee5779df8cc02045a2497ade
+seller-automation-utils @ git+https://github.com/dominicci13/shared-python-utils.git@e2c47c99f9b0f19ef193dbd6f082a2175b267488
 
 # Direct imports
 pandas
