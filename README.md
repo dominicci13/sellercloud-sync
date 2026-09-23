@@ -159,7 +159,7 @@ py -3.12 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
-`requirements.txt` pins seller-automation-utils to a commit (1.8.4, `e2c47c9`); bump the pin deliberately, never install the library unpinned.
+`requirements.txt` pins seller-automation-utils to a commit (1.8.5, `f8defe9`); bump the pin deliberately, never install the library unpinned.
 
 ### 2. Configure
 
