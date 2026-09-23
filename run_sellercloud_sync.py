@@ -3,14 +3,17 @@
 Once per day at 05:15 local time (~15 minutes after the SellerCloud daily report
 typically lands in OneDrive), this script:
 
-1. Reads the most recent ``SellerCloud.xlsx`` from the configured OneDrive path.
-2. Confirms its modification date is today (otherwise skips — yesterday's data
-   is already in the table, and we'd rather miss a day than overwrite with
-   stale data).
+1. Stats ``SellerCloud.xlsx`` itself (not the folder) in the configured OneDrive
+   path and confirms its modification date is today. A stale or missing file
+   leaves the table untouched, logs a WARNING and emails ``ALERT_EMAIL`` once
+   per file date (``_alert_stale_export``) — we'd rather miss a day than
+   overwrite with stale data, but never silently.
+2. Reads the file.
 3. Compares the report's headers against ``COLUMN_TYPES`` and emails a one-time
    alert (to ``ALERT_EMAIL``) when columns are added or removed, with copy-paste
    steps to wire them into this script and the SQL table. A *removed* mapped
-   column aborts the write so a stale schema can't empty the table.
+   column aborts the write so a stale schema can't empty the table, and so does
+   an export with no data rows (alerted once per file date).
 4. Clears the ``Reports.SellerCloud`` table.
 5. Bulk-inserts every row via ``seller_automation_utils.database_utils.insert_dataframe``.
 
@@ -24,7 +27,7 @@ import json
 import os
 import traceback
 import warnings
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -32,7 +35,6 @@ from dotenv import load_dotenv
 
 from seller_automation_utils import alert_utils, custom_functions, database_utils, outlook
 from seller_automation_utils.config_utils import get_env, load_config_safe
-from seller_automation_utils.file_utils import latest_modified_date
 from seller_automation_utils.logging_utils import setup_logging
 from seller_automation_utils.schedule_utils import run_on_schedule
 from seller_automation_utils.ui_utils import ask_user
@@ -49,6 +51,10 @@ if not table_sellercloud.replace("_", "").isalnum():
 # (Task Scheduler / cron wrappers etc.)
 _paths = load_config_safe(Path(__file__).resolve().parent / "config" / "paths.json")
 sellercloud_file_path: str = _paths["sellercloud_file_path"]
+# The one file both the freshness guard and the reader use, so they cannot
+# drift apart. Guarding the folder instead is what let a daily-rewritten
+# sibling workbook pass the check for weeks while this file sat stale.
+SELLERCLOUD_FILE: Path = Path(sellercloud_file_path) / "SellerCloud.xlsx"
 
 
 # --- Column schema --------------------------------------------------------
@@ -133,6 +139,19 @@ SCHEMA_TYPE_TO_SQL: dict[str, str] = {
 # Tracks which drifted columns we've already emailed about so a daily run alerts
 # once per column instead of every morning until it's mapped.
 _ALERT_STATE_PATH = Path(__file__).resolve().parent / "logs" / "schema_alert_state.json"
+
+# Separate file, not a key in the schema one: _save_alert_state rewrites that
+# file whole, so a sibling key there would be erased on every schema check.
+_FRESHNESS_STATE_PATH = Path(__file__).resolve().parent / "logs" / "freshness_alert_state.json"
+
+# Its own file because main clears the freshness state on every fresh run,
+# which would defeat this debounce on a same-day rerun.
+_EMPTY_EXPORT_STATE_PATH = Path(__file__).resolve().parent / "logs" / "empty_export_alert_state.json"
+
+_EXPORT_ORIGIN_NOTE = (
+    "SellerCloud.xlsx is produced by a SellerCloud scheduled report, not by any "
+    "automation in this repo."
+)
 
 
 def _sql_identifier(name: str) -> str:
@@ -379,13 +398,253 @@ def _alert_schema_drift(
     return missing_cols
 
 
+def export_is_fresh(path: Path, today: date) -> tuple[bool, datetime | None]:
+    """Decide whether the export file itself was written today.
+
+    Stats ``path`` directly. Never infer freshness from the folder: another
+    workbook in the same folder is rewritten daily and would always read as
+    "today".
+
+    Args:
+        path: The export file, normally ``SELLERCLOUD_FILE``.
+        today: The run's local date.
+
+    Returns:
+        ``(fresh, modified)`` — ``fresh`` is True only when the file exists and
+        its local modification date equals ``today``. ``modified`` is the file's
+        LastWriteTime, or None when the file does not exist.
+
+    Raises:
+        OSError: Any stat failure other than a missing file (permissions, an
+            unreachable drive), so the crash handler reports it instead of the
+            run treating it as "missing".
+    """
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return False, None
+    modified = datetime.fromtimestamp(mtime)
+    return modified.date() == today, modified
+
+
+def _stale_alert_key(modified: datetime | None) -> str:
+    """Debounce key: one alert per stale file date, or one for a missing file.
+
+    Args:
+        modified: The file's LastWriteTime, or None when it is missing.
+
+    Returns:
+        ``"missing"`` or the ISO date of ``modified``.
+    """
+    return "missing" if modified is None else modified.date().isoformat()
+
+
+def _load_freshness_state(path: Path) -> str | None:
+    """Read the key of the last stale-export alert sent.
+
+    A missing, unreadable or corrupt file reads as "nothing alerted yet", which
+    errs toward sending the alert again rather than staying quiet.
+
+    Args:
+        path: The freshness state file.
+
+    Returns:
+        The last alerted key, or None.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None
+    # OSError: permissions or a directory at the path; ValueError: bad JSON or
+    # non-UTF-8 bytes (UnicodeDecodeError).
+    except (OSError, ValueError) as exc:
+        log.warning(f"Alert state [cyan]{path}[/cyan] unreadable ({exc!r}); treating as empty.")
+        return None
+    alerted = data.get("alerted") if isinstance(data, dict) else None
+    return alerted if isinstance(alerted, str) else None
+
+
+def _save_freshness_state(path: Path, alerted: str | None) -> None:
+    """Persist the last alerted key (None clears it once the export is fresh again).
+
+    Args:
+        path: The freshness state file.
+        alerted: Key from ``_stale_alert_key``, or None.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"alerted": alerted}, fh, indent=2)
+
+
+def _build_stale_alert(
+    path: Path, modified: datetime | None, today: date, table: str
+) -> tuple[str, str]:
+    """Render the stale/missing-export alert.
+
+    Args:
+        path: The export file that was checked.
+        modified: Its LastWriteTime, or None when it is missing.
+        today: The run's local date.
+        table: SQL table the sync would have reloaded.
+
+    Returns:
+        ``(subject, html_body)``. Every interpolated value is HTML-escaped.
+    """
+    e_path = html.escape(str(path))
+    e_table = html.escape(table)
+    if modified is None:
+        subject = "[STALE] SellerCloud export is missing - sync skipped"
+        facts = (
+            f"<p><b>File:</b> <code>{e_path}</code><br>"
+            f"<b>Status:</b> not found<br>"
+            f"<b>Run date:</b> {today.isoformat()}</p>"
+        )
+    else:
+        days = (today - modified.date()).days
+        age = f"{days} day(s) stale" if days > 0 else "dated in the future"
+        subject = (
+            f"[STALE] SellerCloud export dated {modified.date().isoformat()} "
+            f"({age}) - sync skipped"
+        )
+        facts = (
+            f"<p><b>File:</b> <code>{e_path}</code><br>"
+            f"<b>LastWriteTime:</b> {html.escape(modified.strftime('%Y-%m-%d %H:%M:%S'))}<br>"
+            f"<b>Age:</b> {html.escape(age)}<br>"
+            f"<b>Run date:</b> {today.isoformat()}</p>"
+        )
+    body = "\n".join(
+        [
+            "<p>The daily SellerCloud sync did <b>not</b> reload the table because "
+            "the export file was not written today.</p>",
+            facts,
+            f"<p><b>The <code>{e_table}</code> table was left untouched</b> (no DELETE, "
+            "no insert). It still holds whatever the last successful load wrote, so "
+            "anything reading it is working from that date's catalog.</p>",
+            f"<p>{html.escape(_EXPORT_ORIGIN_NOTE)}</p>",
+            "<p>No action is needed in this repo: the next 05:15 run reloads "
+            "automatically once a file dated that day lands. This email is sent once "
+            "per file date; the log repeats the WARNING every run until then.</p>",
+        ]
+    )
+    return subject, body
+
+
+def _alert_stale_export(
+    path: Path,
+    modified: datetime | None,
+    today: date,
+    table: str,
+    state_path: Path = _FRESHNESS_STATE_PATH,
+) -> bool:
+    """Log a stale/missing export every run and email it once per file date.
+
+    The state is written only after the email is handed to Outlook, so a failed
+    send propagates to the crash handler and the alert is retried next run.
+
+    Args:
+        path: The export file that was checked.
+        modified: Its LastWriteTime, or None when it is missing.
+        today: The run's local date.
+        table: SQL table the sync would have reloaded.
+        state_path: Where the last alerted key lives.
+
+    Returns:
+        True when an email was sent this run, False when debounced.
+
+    Raises:
+        ValueError: If ``ALERT_EMAIL`` is not set.
+        Exception: Whatever ``outlook.send_email`` raises on a failed send.
+    """
+    what = "is missing" if modified is None else f"is dated {modified:%Y-%m-%d %H:%M:%S}"
+    log.warning(
+        f"[cyan]{path}[/cyan] {what}, not today ({today.isoformat()}). "
+        f"Table [cyan]{table}[/cyan] left untouched."
+    )
+
+    key = _stale_alert_key(modified)
+    if _load_freshness_state(state_path) == key:
+        log.warning(f"Stale-export alert for '{key}' already emailed; not re-sending.")
+        return False
+
+    alert_email = get_env("ALERT_EMAIL", required=True)
+    subject, body = _build_stale_alert(path, modified, today, table)
+    outlook.send_email(
+        account=alert_email,
+        subject=subject,
+        body=body,
+        to=[alert_email],
+        show=False,
+        send=True,
+    )
+    _save_freshness_state(state_path, key)
+    log.warning(f"Stale-export alert emailed to [cyan]{alert_email}[/cyan].")
+    return True
+
+
+def _alert_empty_export(path: Path, table: str, state_path: Path) -> bool:
+    """Log a fresh-dated export with no data rows every run; email it once per file date.
+
+    Uses the same state-file helpers and send-then-save ordering as
+    ``_alert_stale_export``.
+
+    Args:
+        path: The export file that was read.
+        table: SQL table the sync would have reloaded.
+        state_path: Where the last alerted key lives.
+
+    Returns:
+        True when an email was sent this run, False when debounced.
+
+    Raises:
+        ValueError: If ``ALERT_EMAIL`` is not set.
+        Exception: Whatever ``outlook.send_email`` raises on a failed send.
+    """
+    modified = datetime.fromtimestamp(path.stat().st_mtime)
+    log.warning(
+        f"[cyan]{path}[/cyan] (dated {modified:%Y-%m-%d %H:%M:%S}) has no data rows. "
+        f"Table [cyan]{table}[/cyan] left untouched."
+    )
+
+    key = modified.date().isoformat()
+    if _load_freshness_state(state_path) == key:
+        log.warning(f"Empty-export alert for '{key}' already emailed; not re-sending.")
+        return False
+
+    alert_email = get_env("ALERT_EMAIL", required=True)
+    body = "\n".join(
+        [
+            "<p>The daily SellerCloud sync did <b>not</b> reload the table because "
+            "the export file has headers but no data rows.</p>",
+            f"<p><b>File:</b> <code>{html.escape(str(path))}</code><br>"
+            f"<b>LastWriteTime:</b> {html.escape(modified.strftime('%Y-%m-%d %H:%M:%S'))}</p>",
+            f"<p><b>The <code>{html.escape(table)}</code> table was left untouched</b> "
+            "(no DELETE, no insert).</p>",
+            f"<p>{html.escape(_EXPORT_ORIGIN_NOTE)}</p>",
+        ]
+    )
+    outlook.send_email(
+        account=alert_email,
+        subject=f"[EMPTY] SellerCloud export dated {key} has no rows - sync skipped",
+        body=body,
+        to=[alert_email],
+        show=False,
+        send=True,
+    )
+    _save_freshness_state(state_path, key)
+    log.warning(f"Empty-export alert emailed to [cyan]{alert_email}[/cyan].")
+    return True
+
+
 def sellercloud_db(reports_cursor) -> None:
     """Replace every row in the SellerCloud SQL table with the latest export.
 
-    Reads ``SellerCloud.xlsx`` from ``sellercloud_file_path`` and checks its
+    Reads ``SELLERCLOUD_FILE`` (the same file ``main`` freshness-checked) and checks its
     headers against ``COLUMN_TYPES`` first. New or missing columns trigger a
     one-time email (``_alert_schema_drift``); missing columns also abort the
-    write so a stale-schema run never empties the table. Otherwise it normalizes
+    write so a stale-schema run never empties the table. An export with headers
+    but no data rows also aborts the write and alerts once per file date
+    (``_alert_empty_export``). Otherwise it normalizes
     column dtypes, ``DELETE``s all existing rows, and bulk-inserts every row via
     ``insert_dataframe``.
 
@@ -414,7 +673,7 @@ def sellercloud_db(reports_cursor) -> None:
     # Read text columns as str so leading zeros and long IDs (eBayItemID,
     # WalmartAPIItemID) don't get coerced to floats and pick up a ".0".
     df = pd.read_excel(
-        f"{sellercloud_file_path}/SellerCloud.xlsx",
+        SELLERCLOUD_FILE,
         dtype={c: str for c in text_cols},
     )
 
@@ -423,6 +682,12 @@ def sellercloud_db(reports_cursor) -> None:
         log.warning(
             f"Mapped column(s) missing from the report: {missing_cols}. "
             f"Skipping the DB write to keep the table intact."
+        )
+        return
+
+    if df.empty:
+        _alert_empty_export(
+            SELLERCLOUD_FILE, table_sellercloud, state_path=_EMPTY_EXPORT_STATE_PATH
         )
         return
 
@@ -450,33 +715,32 @@ def sellercloud_db(reports_cursor) -> None:
 def main() -> None:
     """Daily SellerCloud-to-SQL sync pipeline.
 
-    Checks that today's ``SellerCloud.xlsx`` has actually arrived in the
-    configured folder before touching the DB. If the latest file is older
-    than today, logs a warning and exits cleanly — downstream reports run
-    on yesterday's data instead of corrupted partial state.
+    Checks that ``SELLERCLOUD_FILE`` itself was written today before opening a
+    DB connection. A stale or missing file goes to ``_alert_stale_export``
+    (WARNING every run, email once per file date) and the run returns without
+    connecting, so the table keeps its current rows. A fresh file clears the
+    alert state, so the next stale date alerts again.
 
     Raises:
         SystemExit: On KeyboardInterrupt (clean) or unhandled exception
-            (after sending a crash report via Outlook).
+            (after sending a crash report via Outlook). A failed stale-export
+            email is such an exception, so it is never swallowed.
     """
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        latest = latest_modified_date(sellercloud_file_path)
-
-        if latest is None:
-            log.warning(
-                f"No files found in [cyan]{sellercloud_file_path}[/cyan]. "
-                f"Skipping SellerCloud upload."
+        today = date.today()
+        fresh, modified = export_is_fresh(SELLERCLOUD_FILE, today)
+        if not fresh:
+            _alert_stale_export(
+                SELLERCLOUD_FILE, modified, today, table_sellercloud,
+                state_path=_FRESHNESS_STATE_PATH,
             )
             return
-
-        if latest.strftime("%Y-%m-%d") != today:
-            log.warning(
-                f"Latest file in [cyan]{sellercloud_file_path}[/cyan] is dated "
-                f"[cyan]{latest.strftime('%Y-%m-%d')}[/cyan], not today. "
-                f"Skipping to preserve table integrity."
-            )
-            return
+        try:
+            if _load_freshness_state(_FRESHNESS_STATE_PATH) is not None:
+                _save_freshness_state(_FRESHNESS_STATE_PATH, None)
+        except OSError as exc:
+            # Debounce bookkeeping must never cost a day's load.
+            log.warning(f"Could not clear the stale-export alert state ({exc!r}); loading anyway.")
 
         log.info("Uploading [cyan]SellerCloud[/cyan] items to database.")
         reports_conn = custom_functions.sql_connection("Reports")
