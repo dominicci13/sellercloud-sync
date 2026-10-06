@@ -65,6 +65,8 @@ SELLERCLOUD_FILE: Path = Path(sellercloud_file_path) / "SellerCloud.xlsx"
 #   "text"       -> string; blanks become "" (read as str so leading zeros and
 #                   long numeric IDs like eBayItemID survive without a ".0").
 #   "int"        -> whole number; blanks/garbage become 0.
+#   "int_null"   -> whole number; blanks/garbage stay NULL (IDs where 0 would
+#                   read as a real value, e.g. "Informed.Co Strategy ID").
 #   "float"      -> decimal; blanks/garbage become 0.
 #   "float_null" -> decimal; blanks stay NULL (use for analytical metrics where
 #                   "no data" must stay distinct from a real 0).
@@ -74,13 +76,12 @@ SELLERCLOUD_FILE: Path = Path(sellercloud_file_path) / "SellerCloud.xlsx"
 # line in the right spot with its type — it flows through read, normalize,
 # and insert automatically. Names with spaces/symbols are bracketed for SQL
 # by the shared insert_dataframe (1.8.3+), so write them plainly
-# (e.g. "P&L (30 days)").
+# (e.g. "Informed.Co Strategy ID").
 COLUMN_TYPES: dict[str, str] = {
     "SKU": "text",
     "ASIN": "text",
     "CompanyID": "int",
     "CompanyName": "text",
-    "WalmartAPIItemID": "text",
     "eBayItemID": "text",
     "ProductName": "text",
     "Manufacturer": "text",
@@ -92,36 +93,28 @@ COLUMN_TYPES: dict[str, str] = {
     "FBAQuantity": "int",
     "AmazonPrice": "float",
     "AmazonBusinessPrice": "float",
-    "AmazonBusinessPriceDiscountQty1": "int",
     "Rebate": "float_null",
     "ListPrice": "float",
     "SitePrice": "float",
     "MAPPrice": "float",
     "SiteCost": "float",
     "TotalCost": "float_null",
-    "CountryofOrigin": "text",
     "WeightLbs": "float",
     "WeightOz": "float",
     "Length": "float",
     "Width": "float",
     "Height": "float",
     "OnOrder": "int",
-    "QtySold30": "int",
-    "P&L (30 days)": "float_null",
-    "P&L (90 days)": "float_null",
-    "AverageShippingCost (30 Days)": "float_null",
-    "AverageShippingCost (90 Days)": "float_null",
-    "SearchTerms": "text",
     "AmazonShippingTemplate": "text",
-    "ASIN1": "text",
     "LastReceived": "datetime",
-    "FBAFee": "float_null",
     "MinPrice": "float",
     "IsBundle": "int",
     "QtySold60": "int",
     "Sales60": "float",
     "ConditionName": "text",
     "EnableSellingBelowCost": "int",
+    "Enable For Informed.Co": "int",
+    "Informed.Co Strategy ID": "int_null",
 }
 
 
@@ -131,6 +124,7 @@ COLUMN_TYPES: dict[str, str] = {
 SCHEMA_TYPE_TO_SQL: dict[str, str] = {
     "text": "NVARCHAR({width})",
     "int": "INT",
+    "int_null": "BIGINT",  # headroom: a longer ID never overflows INT
     "float": "FLOAT",
     "float_null": "FLOAT",
     "datetime": "DATETIME",
@@ -158,8 +152,9 @@ def _sql_identifier(name: str) -> str:
     """Bracket a column name for SQL Server when it isn't a plain identifier.
 
     Used only to build the ``ALTER TABLE`` suggestion in the schema-drift
-    alert, where a name with spaces or symbols (e.g. ``P&L (30 days)``) must be
-    wrapped in brackets to be valid T-SQL. Plain names pass through unchanged.
+    alert, where a name with spaces or symbols (e.g. ``Informed.Co Strategy ID``)
+    must be wrapped in brackets to be valid T-SQL. Plain names pass through
+    unchanged.
     The INSERT path does not use it: ``insert_dataframe`` brackets every
     column itself since seller-automation-utils 1.8.3.
 
@@ -309,8 +304,9 @@ def _build_alert_body(
             "<p>Pick the type deliberately: <code>text</code> for IDs/codes (even ones that "
             "look numeric, to keep any leading zeros), <code>int</code>/<code>float</code> "
             "for counts/money, <code>datetime</code> for dates. Use <code>float_null</code> "
-            "instead of <code>float</code> when a blank cell must stay NULL (an analytical "
-            "metric where blank is not the same as 0).</p>"
+            "instead of <code>float</code> (or <code>int_null</code> instead of "
+            "<code>int</code>) when a blank cell must stay NULL (an analytical "
+            "metric or ID where blank is not the same as 0).</p>"
         )
         parts.append(
             "<h4>2) Add to the SQL database</h4>"
@@ -648,14 +644,16 @@ def sellercloud_db(reports_cursor) -> None:
     column dtypes, ``DELETE``s all existing rows, and bulk-inserts every row via
     ``insert_dataframe``.
 
-    The read happens *before* the ``DELETE`` on purpose: if the file is unreadable
-    or its schema drifted, the table keeps yesterday's data instead of being
-    cleared and then left empty by a crash.
+    The read and the dtype normalization happen *before* the ``DELETE`` on
+    purpose: if the file is unreadable, its schema drifted, or a value cannot be
+    coerced, the table keeps yesterday's data instead of being cleared and then
+    left empty by a crash.
 
     Column names go to ``insert_dataframe`` exactly as ``COLUMN_TYPES`` declares
-    them; seller-automation-utils 1.8.3+ brackets each one, so ``P&L (30 days)``
-    needs no renaming here. An older library interpolates names verbatim and
-    the INSERT fails, so the venv must be on 1.8.3 or later.
+    them; seller-automation-utils 1.8.3+ brackets each one, so
+    ``Informed.Co Strategy ID`` needs no renaming here. An older library
+    interpolates names verbatim and the INSERT fails, so the venv must be on
+    1.8.3 or later.
 
     Args:
         reports_cursor: Active pyodbc cursor for the Reports database.
@@ -666,12 +664,13 @@ def sellercloud_db(reports_cursor) -> None:
     """
     text_cols = [c for c, t in COLUMN_TYPES.items() if t == "text"]
     int_cols = [c for c, t in COLUMN_TYPES.items() if t == "int"]
+    int_null_cols = [c for c, t in COLUMN_TYPES.items() if t == "int_null"]
     float_cols = [c for c, t in COLUMN_TYPES.items() if t == "float"]
     float_null_cols = [c for c, t in COLUMN_TYPES.items() if t == "float_null"]
     datetime_cols = [c for c, t in COLUMN_TYPES.items() if t == "datetime"]
 
-    # Read text columns as str so leading zeros and long IDs (eBayItemID,
-    # WalmartAPIItemID) don't get coerced to floats and pick up a ".0".
+    # Read text columns as str so leading zeros and long IDs (eBayItemID)
+    # don't get coerced to floats and pick up a ".0".
     df = pd.read_excel(
         SELLERCLOUD_FILE,
         dtype={c: str for c in text_cols},
@@ -691,9 +690,6 @@ def sellercloud_db(reports_cursor) -> None:
         )
         return
 
-    reports_cursor.execute(f"DELETE FROM {table_sellercloud}")
-    log.info("Table rows deleted successfully.")
-
     for col in float_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     for col in int_cols:
@@ -701,12 +697,27 @@ def sellercloud_db(reports_cursor) -> None:
     for col in text_cols:
         # fillna before astype so blank cells become "" rather than "nan".
         df[col] = df[col].fillna("").astype(str)
+    for col in int_null_cols:
+        # These IDs are typed by hand, so text, decimals and out-of-range values
+        # load as NULL and are counted, never raise: one typo must not block the
+        # whole daily load. Int64, not float, keeps 9-digit IDs integral; the
+        # 2**53 bound keeps the float-to-int cast exact.
+        num = pd.to_numeric(df[col], errors="coerce")
+        s = num.where((num % 1 == 0) & (num.abs() < 2**53)).astype("Int64")
+        nonblank = df[col].notna() & (df[col].astype(str).str.strip() != "")
+        dropped = int((nonblank & s.isna()).sum())
+        if dropped:
+            log.warning(f"{dropped} non-blank '{col}' value(s) were not whole numbers and load as NULL.")
+        df[col] = s.astype(object).where(s.notna(), None)
     for col in float_null_cols:
         s = pd.to_numeric(df[col], errors="coerce")
         df[col] = s.astype(object).where(s.notna(), None)
     for col in datetime_cols:
         s = pd.to_datetime(df[col], errors="coerce")
         df[col] = s.astype(object).where(s.notna(), None)
+
+    reports_cursor.execute(f"DELETE FROM {table_sellercloud}")
+    log.info("Table rows deleted successfully.")
 
     database_utils.insert_dataframe(reports_cursor, table_sellercloud, df, list(COLUMN_TYPES))
     log.info("Data inserted successfully.")

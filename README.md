@@ -99,15 +99,15 @@ No browser, no Excel automation — just a fast, defensive file-to-SQL load:
   insertion. Adding a column the export starts emitting is a one-line edit.
 - **Explicit dtype normalization.** Text columns are read as `str` (so
   leading-zero and long numeric IDs like UPC / SKU / eBayItemID survive without
-  a `.0`); `int`/`float` columns coerce blanks to `0`; `float_null` analytical
-  columns (P&L, shipping cost, FBAFee, Rebate, TotalCost) and the `datetime`
-  `LastReceived` keep blanks as SQL `NULL`. Names with spaces/symbols like
-  `P&L (30 days)` are bracketed for SQL automatically by the shared
+  a `.0`); `int`/`float` columns coerce blanks to `0`; the `float_null`
+  columns (Rebate, TotalCost), the `int_null` `Informed.Co Strategy ID` and the
+  `datetime` `LastReceived` keep blanks as SQL `NULL`. Names with spaces/symbols
+  like `Informed.Co Strategy ID` are bracketed for SQL automatically by the shared
   `insert_dataframe` (seller-automation-utils 1.8.3 or later is required).
 - **Injection-safe table name.** `DB_TABLE_SELLERCLOUD` is validated
   (`isalnum` after stripping underscores) before use.
 - **Full-replace load.** A single `DELETE` then a bulk `insert_dataframe` of all
-  46 columns in their SQL-schema order.
+  37 columns in their SQL-schema order.
 - **Decoupled by design.** Extracted from `amzn-catalog-health` so this daily
   refresh can't be blocked by the long-running nightly scrape.
 
@@ -140,7 +140,7 @@ sellercloud-sync/
 ├── config/
 │   └── paths.json.example      # OneDrive folder holding SellerCloud.xlsx
 ├── logs/                       # rotating run logs + schema/freshness alert state (gitignored)
-├── tests/                      # pytest: freshness guard (email and SQL mocked)
+├── tests/                      # pytest: freshness guard + column normalization (email and SQL mocked)
 ├── pytest.ini
 ├── .env.example
 ├── requirements.txt
